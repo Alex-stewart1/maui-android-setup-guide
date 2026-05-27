@@ -402,6 +402,56 @@ This sets the timeout to 60 seconds.
 
 ---
 
+# AVD Configuration (config.ini)
+
+Each Android Virtual Device has a `config.ini` file that controls hardware properties. It is located at:
+
+```text
+~/.android/avd/<AVD_NAME>.avd/config.ini
+```
+
+On Windows this is typically:
+
+```text
+C:\Users\<USERNAME>\.android\avd\<AVD_NAME>.avd\config.ini
+```
+
+Stop the emulator before editing, then restart it for changes to take effect.
+
+## Enable Physical Keyboard Input
+
+By default the emulator may not accept keyboard input from the host machine. To enable it, set:
+
+```ini
+hw.keyboard=yes
+```
+
+To disable (soft keyboard only):
+
+```ini
+hw.keyboard=no
+```
+
+## Change Screen Resolution and Density
+
+Control the emulator screen dimensions and pixel density with these three keys:
+
+```ini
+hw.lcd.width=1080
+hw.lcd.height=2400
+hw.lcd.density=420
+```
+
+These values (1080 × 2400 @ 420 dpi) match a typical modern phone like a Pixel 6, and are good general-purpose defaults. Adjust them to test different form factors.
+
+| Key             | Description                        |
+|-----------------|------------------------------------|
+| `hw.lcd.width`  | Screen width in pixels             |
+| `hw.lcd.height` | Screen height in pixels            |
+| `hw.lcd.density`| Dots per inch (affects UI scaling) |
+
+---
+
 # Useful Commands
 
 ## Update Android SDK Packages
