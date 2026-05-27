@@ -15,7 +15,15 @@
         6.  Accept the Android SDK licenses.
         7.  Install the required Android SDK components (platform-tools, build-tools, etc.).
         8.  Set the JAVA_HOME, ANDROID_HOME and PATH machine environment variables.
-        9.  Verify the whole toolchain and build a throwaway MAUI project to prove it works.
+        9.  Verify the whole toolchain and (optionally) build a throwaway MAUI project.
+
+    ANDROID PLATFORM SELECTION
+    --------------------------
+    By default the script interactively prompts you to choose an Android API level
+    from a numbered menu. You can also pass -AndroidApiLevel directly to skip the
+    prompt (e.g. -AndroidApiLevel 35).  Pass -SkipAndroidPlatform to install only
+    the core SDK tools (platform-tools, emulator) without any API platform -- in
+    this mode the validation build is automatically skipped.
 
     PRE-FLIGHT CONFLICT CHECK
     -------------------------
@@ -41,7 +49,43 @@
 .PARAMETER Force
     Suppress the final "are you sure" confirmation before destructive actions.
 
+.PARAMETER AndroidApiLevel
+    Android API level number to install (e.g. 35, 34, 33).  When supplied the
+    interactive platform-selection menu is skipped.  Mutually exclusive with
+    -SkipAndroidPlatform.
+
+.PARAMETER SkipAndroidPlatform
+    Do NOT install any Android platform/API level.  Only the core tooling
+    (platform-tools, emulator, build-tools) is installed and the validation
+    build step is skipped automatically.
+
+.PARAMETER JdkMsiSource
+    Override the source for the Microsoft OpenJDK MSI.
+    Accepts EITHER a URL (https://...) OR a local file path (C:\Downloads\jdk.msi).
+    When a local path is given the file is used directly -- no download occurs.
+    Default: https://aka.ms/download-jdk/microsoft-jdk-21-windows-x64.msi
+
+.PARAMETER CmdlineToolsSource
+    Override the source for the Android command-line tools ZIP.
+    Accepts EITHER a URL (https://...) OR a local file path (C:\Downloads\cmdline-tools.zip).
+    When a local path is given the file is used directly -- no download occurs.
+    Default: https://dl.google.com/android/repository/commandlinetools-win-11076708_latest.zip
+
 .NOTES
+    OFFLINE / AIR-GAPPED INSTALLS
+    ------------------------------
+    To run this script on a machine with no internet access, pre-download the two
+    installers on another machine and transfer them, then pass the local paths:
+
+        .\Install-MauiAndroid.ps1 `
+            -JdkMsiSource      "D:\Installers\microsoft-jdk-21-windows-x64.msi" `
+            -CmdlineToolsSource "D:\Installers\commandlinetools-win-11076708_latest.zip"
+
+    The script will copy/use the files in place rather than downloading them.
+    (.NET 10 SDK still requires winget or an internet connection unless you
+    pre-install it separately before running this script.)
+
+
     *** MUST BE RUN FROM AN ELEVATED (Administrator) PowerShell PROMPT. ***
     Setting MACHINE-level environment variables and installing into
     "C:\Program Files" both require admin rights.
@@ -53,7 +97,22 @@
 [CmdletBinding()]
 param(
     [switch]$ReinstallClean,
-    [switch]$Force
+    [switch]$Force,
+
+    # Android platform selection (mutually exclusive).
+    # 0 = "not specified; prompt the user interactively".
+    [ValidateRange(0, 99)]
+    [int]$AndroidApiLevel = 0,
+
+    # Pass this switch to install only the core SDK tools with NO platform/API
+    # level. The validation build step is automatically skipped in this mode.
+    [switch]$SkipAndroidPlatform,
+
+    # Source overrides for downloaded installers.
+    # Each accepts either a URL (https://...) or a local file path (C:\path\to\file).
+    # Leave empty to use the built-in default URLs.
+    [string]$JdkMsiSource       = '',
+    [string]$CmdlineToolsSource = ''
 )
 
 # Stop on the first unhandled error so we never half-configure the machine.
@@ -63,6 +122,11 @@ $ErrorActionPreference = 'Stop'
 #  CONFIGURATION  -- the exact versions / paths the guide specifies.
 #  Change these in ONE place if the guide is ever updated.
 # ---------------------------------------------------------------------------
+
+# Apply source overrides (empty string = keep the built-in default URL).
+$_DefaultJdkMsiSource       = 'https://aka.ms/download-jdk/microsoft-jdk-21-windows-x64.msi'
+$_DefaultCmdlineToolsSource = 'https://dl.google.com/android/repository/commandlinetools-win-11076708_latest.zip'
+
 $Config = [ordered]@{
     # Where the Android SDK lives. Near the drive root to dodge path-length limits.
     AndroidSdkRoot   = 'C:\Program Files (x86)\Android\android-sdk'
@@ -70,21 +134,19 @@ $Config = [ordered]@{
     # Expected install root for Microsoft OpenJDK 21 ("hotspot" build).
     JdkInstallRoot   = 'C:\Program Files\Microsoft\jdk-21-hotspot'
 
-    # Android API level / build-tools the guide installs.
-    AndroidApiLevel  = 'android-35'
-    BuildToolsVer    = '35.0.0'
+    # Android API level / build-tools -- resolved later after user prompt.
+    # AndroidApiLevel and BuildToolsVer are populated in Resolve-AndroidPlatform.
+    AndroidApiLevel  = ''
+    BuildToolsVer    = ''
 
     # The MAUI target framework moniker we build against to prove the setup works.
     MauiTfm          = 'net10.0-android'
 
-    # --- Download sources -------------------------------------------------
-    # Microsoft OpenJDK 21 (Windows x64 MSI). Microsoft publishes a stable
-    # "latest" alias so we don't have to hard-code a patch version.
-    JdkMsiUrl        = 'https://aka.ms/download-jdk/microsoft-jdk-21-windows-x64.msi'
-
-    # Google Android command-line tools (Windows). The version in the URL is the
-    # tools package revision, not the Android API; this is the current stable zip.
-    CmdlineToolsUrl  = 'https://dl.google.com/android/repository/commandlinetools-win-11076708_latest.zip'
+    # --- Installer sources ------------------------------------------------
+    # Each may be a URL (https://...) or a local file path.
+    # Overridable via -JdkMsiSource / -CmdlineToolsSource parameters.
+    JdkMsiSource        = if ($JdkMsiSource)       { $JdkMsiSource }       else { $_DefaultJdkMsiSource }
+    CmdlineToolsSource  = if ($CmdlineToolsSource) { $CmdlineToolsSource } else { $_DefaultCmdlineToolsSource }
 
     # .NET 10 SDK winget package id (preferred install path).
     DotNetWingetId   = 'Microsoft.DotNet.SDK.10'
@@ -111,6 +173,217 @@ function Write-Banner {
     Write-Host $line -ForegroundColor DarkCyan
     Write-Host ("  " + $Title) -ForegroundColor White
     Write-Host $line -ForegroundColor DarkCyan
+}
+
+# ===========================================================================
+#  ANDROID PLATFORM CATALOGUE  (live -- queried from sdkmanager)
+#
+#  Calls "sdkmanager --list" against the already-installed cmdline-tools and
+#  parses its output to discover every available platform and the best
+#  matching build-tools version.  Returns an [ordered] hashtable keyed by
+#  integer API level, highest first:
+#
+#      @{ 35 = @{ Label='Android 15 (API 35)'; BuildTools='35.0.0' }; ... }
+#
+#  This replaces the old hardcoded catalogue -- no manual updates needed when
+#  Google ships a new API level.
+# ===========================================================================
+function Get-AndroidPlatformCatalogue {
+    param([string]$JavaHome)
+
+    Write-Step "Querying available Android platforms from sdkmanager..."
+
+    $sdkManager = Join-Path $Config.AndroidSdkRoot 'cmdline-tools\latest\bin\sdkmanager.bat'
+    if (-not (Test-Path $sdkManager)) {
+        throw "sdkmanager not found at '$sdkManager'. Cannot query available platforms."
+    }
+
+    # sdkmanager needs JAVA_HOME in the environment to run at all.
+    $env:JAVA_HOME    = $JavaHome
+    $env:ANDROID_HOME = $Config.AndroidSdkRoot
+
+    # Capture stdout; sdkmanager writes progress noise to stderr so we only
+    # redirect stdout.  The "--list" flag does NOT require accepted licenses.
+    Write-Info "Running: sdkmanager --list --sdk_root=`"$($Config.AndroidSdkRoot)`""
+    $rawLines = & $sdkManager --list --sdk_root="$($Config.AndroidSdkRoot)" 2>$null
+
+    if (-not $rawLines) {
+        throw "sdkmanager --list produced no output. Check your network connection and that the JDK is working correctly."
+    }
+
+    # ---- Parse available platforms ----------------------------------------
+    # We only want the "Available Packages" section (not "Installed Packages").
+    # sdkmanager --list output looks like:
+    #
+    #   Available Packages:
+    #     Path                              | Version | Description
+    #     -------                           | ------- | -----------
+    #     platforms;android-35              | 3       | Android SDK Platform 35
+    #     build-tools;35.0.0               | 35.0.0  | Android SDK Build-Tools 35
+    #     ...
+    #
+    # We collect ALL build-tools versions first, then match per API level.
+
+    $inAvailable  = $false
+    $platformApis = [System.Collections.Generic.List[int]]::new()
+    $buildToolsVersions = [System.Collections.Generic.List[version]]::new()
+
+    foreach ($line in $rawLines) {
+        # Detect section headers.
+        if ($line -match '(?i)available packages') { $inAvailable = $true;  continue }
+        if ($line -match '(?i)installed packages') { $inAvailable = $false; continue }
+        if ($line -match '(?i)installed updates')  { $inAvailable = $false; continue }
+
+        if (-not $inAvailable) { continue }
+
+        # Match "  platforms;android-NN  |  ..."
+        if ($line -match '^\s+platforms;android-(\d+)\s*\|') {
+            $api = [int]$Matches[1]
+            if ($api -gt 0) { $platformApis.Add($api) }
+            continue
+        }
+
+        # Match "  build-tools;X.Y.Z  |  ..."
+        if ($line -match '^\s+build-tools;(\d+\.\d+\.\d+)\s*\|') {
+            $ver = $null
+            if ([version]::TryParse($Matches[1], [ref]$ver)) {
+                $buildToolsVersions.Add($ver)
+            }
+        }
+    }
+
+    if ($platformApis.Count -eq 0) {
+        throw "sdkmanager --list ran but no 'platforms;android-*' packages were found. " +
+              "Check your internet connection -- sdkmanager needs to reach dl.google.com."
+    }
+
+    # Sort API levels highest first for the menu.
+    $sortedApis = $platformApis | Sort-Object -Descending | Select-Object -Unique
+
+    # For each API level, pick the highest available build-tools with the same
+    # major version number (e.g. API 35 -> build-tools 35.x.x).  If no exact
+    # major match exists, fall back to the overall highest available build-tools.
+    $highestOverall = $buildToolsVersions | Sort-Object -Descending | Select-Object -First 1
+
+    $catalogue = [ordered]@{}
+    foreach ($api in $sortedApis) {
+        $sameMajor = $buildToolsVersions |
+                     Where-Object { $_.Major -eq $api } |
+                     Sort-Object -Descending |
+                     Select-Object -First 1
+
+        $bt = if ($sameMajor) { $sameMajor } else { $highestOverall }
+        $btStr = if ($bt) { $bt.ToString() } else { "$api.0.0" }
+
+        $catalogue[$api] = [ordered]@{
+            Label      = "API $api"   # enriched with Android name below
+            BuildTools = $btStr
+        }
+    }
+
+    # Enrich labels with known Android release names (purely cosmetic; the
+    # catalogue remains fully functional for any unknown future API levels).
+    $androidNames = @{
+        36 = 'Android 16'
+        35 = 'Android 15'
+        34 = 'Android 14'
+        33 = 'Android 13'
+        32 = 'Android 12L'
+        31 = 'Android 12'
+        30 = 'Android 11'
+        29 = 'Android 10'
+        28 = 'Android 9 (Pie)'
+        27 = 'Android 8.1 (Oreo)'
+        26 = 'Android 8.0 (Oreo)'
+    }
+    foreach ($api in @($catalogue.Keys)) {
+        $name = if ($androidNames.ContainsKey($api)) { $androidNames[$api] } else { "Android API $api" }
+        $catalogue[$api].Label = "$name  (API $api)"
+    }
+
+    $highestApi = ($sortedApis | Select-Object -First 1)
+    Write-Ok "Found $($catalogue.Count) available platform(s). Latest: API $highestApi."
+    return $catalogue
+}
+
+# ===========================================================================
+#  ANDROID PLATFORM SELECTION
+#  Presents an interactive numbered menu when the user has not specified an
+#  API level via -AndroidApiLevel or -SkipAndroidPlatform.
+#  Receives the live catalogue from Get-AndroidPlatformCatalogue.
+#  Populates $Config.AndroidApiLevel and $Config.BuildToolsVer.
+# ===========================================================================
+function Resolve-AndroidPlatform {
+    param(
+        # Ordered hashtable from Get-AndroidPlatformCatalogue.
+        # Null/empty means -SkipAndroidPlatform was set -- skip everything.
+        $Catalogue
+    )
+
+    # -SkipAndroidPlatform wins outright (Catalogue will be $null).
+    if (-not $Catalogue -or $Catalogue.Count -eq 0) {
+        Write-Step "Android platform: SKIPPED (-SkipAndroidPlatform specified)"
+        Write-Warnish "No Android platform will be installed. The validation build step will be skipped."
+        $Config.AndroidApiLevel = ''
+        $Config.BuildToolsVer   = ''
+        return
+    }
+
+    # -AndroidApiLevel supplied on the command line -- look it up in the live catalogue.
+    if ($AndroidApiLevel -gt 0) {
+        if ($Catalogue.Contains($AndroidApiLevel)) {
+            $entry = $Catalogue[$AndroidApiLevel]
+            Write-Step "Android platform: $($entry.Label)  build-tools $($entry.BuildTools)  (from -AndroidApiLevel parameter)"
+            $Config.AndroidApiLevel = "android-$AndroidApiLevel"
+            $Config.BuildToolsVer   = $entry.BuildTools
+        } else {
+            # Requested level not in the live list (e.g. very new or very old).
+            # Trust the user and derive build-tools from the major version.
+            Write-Warnish "API $AndroidApiLevel was not found in the sdkmanager package list."
+            Write-Warnish "Proceeding anyway -- sdkmanager will error if the package truly does not exist."
+            $Config.AndroidApiLevel = "android-$AndroidApiLevel"
+            $Config.BuildToolsVer   = "$AndroidApiLevel.0.0"
+        }
+        return
+    }
+
+    # Interactive menu.
+    Write-Banner "Android Platform Selection"
+    Write-Host "  Available platforms (queried live from Google's SDK repository):" -ForegroundColor White
+    Write-Host ""
+
+    $keys = @($Catalogue.Keys)   # already sorted highest -> lowest
+
+    for ($i = 0; $i -lt $keys.Count; $i++) {
+        $api   = $keys[$i]
+        $entry = $Catalogue[$api]
+        # Mark the highest available API as recommended.
+        $marker = if ($i -eq 0) { '  [latest]' } else { '' }
+        Write-Host ("  [{0,2}]  {1}   (build-tools {2}){3}" -f ($i + 1), $entry.Label, $entry.BuildTools, $marker) -ForegroundColor White
+    }
+    Write-Host ""
+    Write-Host ("  [{0,2}]  Skip -- do not install any Android platform" -f ($keys.Count + 1)) -ForegroundColor DarkGray
+    Write-Host ""
+
+    $maxChoice = $keys.Count + 1
+    do {
+        $raw = Read-Host "  Enter choice (1-$maxChoice)"
+        $n   = 0
+        $ok  = [int]::TryParse($raw.Trim(), [ref]$n) -and $n -ge 1 -and $n -le $maxChoice
+        if (-not $ok) { Write-Warnish "  Please enter a number between 1 and $maxChoice." }
+    } while (-not $ok)
+
+    if ($n -eq $maxChoice) {
+        Write-Warnish "No Android platform selected. The validation build step will be skipped."
+        $Config.AndroidApiLevel = ''
+        $Config.BuildToolsVer   = ''
+    } else {
+        $api   = $keys[$n - 1]
+        $entry = $Catalogue[$api]
+        Write-Ok "Selected: $($entry.Label)  (build-tools $($entry.BuildTools))"
+        $Config.AndroidApiLevel = "android-$api"
+        $Config.BuildToolsVer   = $entry.BuildTools
+    }
 }
 
 # ===========================================================================
@@ -173,6 +446,45 @@ function Get-RemoteFile {
         throw "Download failed or produced an empty file: $Url"
     }
     Write-Ok "Downloaded $([IO.Path]::GetFileName($OutFile)) ($([math]::Round((Get-Item $OutFile).Length/1MB,1)) MB)"
+}
+
+# ---------------------------------------------------------------------------
+#  Resolve-FileSource
+#  Accepts either a URL or a local filesystem path and ensures the file is
+#  available at $DestPath inside the working directory.
+#
+#    URL   -> downloads to $DestPath (same as before)
+#    Local -> validates the file exists and copies it to $DestPath so the
+#             rest of the script always has a private working copy.
+#
+#  Returns the resolved local path (always == $DestPath).
+# ---------------------------------------------------------------------------
+function Resolve-FileSource {
+    param(
+        [string]$Source,    # URL or local path
+        [string]$DestPath   # where to put the file inside $WorkDir
+    )
+
+    $isLocal = -not ($Source -match '(?i)^https?://')
+
+    if ($isLocal) {
+        # Normalise to an absolute path (handles relative paths like .\file.zip).
+        $resolved = [IO.Path]::GetFullPath($Source)
+
+        if (-not (Test-Path $resolved -PathType Leaf)) {
+            throw "Local file not found: '$resolved'"
+        }
+        $sizeMb = [math]::Round((Get-Item $resolved).Length / 1MB, 1)
+        Write-Info "Using local file : $resolved  ($sizeMb MB)"
+        Write-Info "Copying       -> $DestPath"
+        Copy-Item -Path $resolved -Destination $DestPath -Force
+        Write-Ok  "Copied $([IO.Path]::GetFileName($DestPath)) from local path."
+    }
+    else {
+        Get-RemoteFile -Url $Source -OutFile $DestPath
+    }
+
+    return $DestPath
 }
 
 # ===========================================================================
@@ -408,7 +720,7 @@ function Install-MicrosoftJdk21 {
         return
     }
     $msi = Join-Path $WorkDir 'microsoft-jdk-21.msi'
-    Get-RemoteFile -Url $Config.JdkMsiUrl -OutFile $msi
+    Resolve-FileSource -Source $Config.JdkMsiSource -DestPath $msi | Out-Null
 
     Write-Info "Running the MSI silently (msiexec /i ... /qn)..."
     $p = Start-Process msiexec.exe -ArgumentList "/i `"$msi`" /qn /norestart" -Wait -PassThru
@@ -419,15 +731,19 @@ function Install-MicrosoftJdk21 {
 }
 
 # Resolve the real JDK folder. We prefer the guide's exact path, but if the MSI
-# laid down a slightly different patch-versioned "jdk-21.x.x-hotspot" folder we
-# locate it dynamically so JAVA_HOME is always correct.
+# laid down a patch-versioned "jdk-21.x.x-hotspot" folder (or a different major
+# version if -JdkMsiSource was overridden) we locate it dynamically so JAVA_HOME
+# is always correct.
 function Resolve-JdkHome {
     if (Test-Path $Config.JdkInstallRoot) { return $Config.JdkInstallRoot }
+
+    # Walk C:\Program Files\Microsoft and find ANY jdk-*-hotspot folder.
     $found = Get-ChildItem 'C:\Program Files\Microsoft' -Directory -ErrorAction SilentlyContinue |
-             Where-Object { $_.Name -match '(?i)jdk-21.*hotspot' } |
+             Where-Object { $_.Name -match '(?i)jdk-[\d.]+-hotspot' -and (Test-Path (Join-Path $_.FullName 'bin\java.exe')) } |
+             Sort-Object Name -Descending |   # prefer highest version if multiple exist
              Select-Object -First 1
     if ($found) { return $found.FullName }
-    throw "Could not locate the Microsoft OpenJDK 21 install folder."
+    throw "Could not locate the Microsoft OpenJDK install folder under C:\Program Files\Microsoft."
 }
 
 # --- README Steps 4-7: download + lay out the Android command-line tools ---
@@ -450,9 +766,9 @@ function Install-AndroidCmdlineTools {
         return
     }
 
-    # Step 4: download the zip.
+    # Step 4: obtain the zip (download or copy from local path).
     $zip = Join-Path $WorkDir 'cmdline-tools.zip'
-    Get-RemoteFile -Url $Config.CmdlineToolsUrl -OutFile $zip
+    Resolve-FileSource -Source $Config.CmdlineToolsSource -DestPath $zip | Out-Null
 
     # Step 6: extract to a staging folder first so we control the final layout.
     $stage = Join-Path $WorkDir 'cmdline-extract'
@@ -500,14 +816,23 @@ function Install-AndroidSdkComponents {
     Write-Ok "Licenses accepted."
 
     # Step 9: install the required components from the guide.
-    $packages = @(
+    # Core packages are always installed; the platform + build-tools are only
+    # added when the user chose an API level (AndroidApiLevel is non-empty).
+    $packages = [System.Collections.Generic.List[string]]@(
         'platform-tools',
-        'emulator',
-        "platforms;$($Config.AndroidApiLevel)",
-        "build-tools;$($Config.BuildToolsVer)"
+        'emulator'
     )
+
+    if ($Config.AndroidApiLevel) {
+        $packages.Add("platforms;$($Config.AndroidApiLevel)")
+        $packages.Add("build-tools;$($Config.BuildToolsVer)")
+        Write-Info "Platform packages: $($Config.AndroidApiLevel)  build-tools $($Config.BuildToolsVer)"
+    } else {
+        Write-Warnish "No Android platform selected -- skipping platforms and build-tools packages."
+    }
+
     Write-Info "Installing packages: $($packages -join ', ')"
-    & $sdkManager --sdk_root="$($Config.AndroidSdkRoot)" $packages
+    & $sdkManager --sdk_root="$($Config.AndroidSdkRoot)" @packages
     Write-Ok "Android SDK components installed."
 }
 
@@ -596,6 +921,38 @@ try {
     Write-Info "environment variables, and verify everything with a test build."
     Write-Info "All downloads go to a temp folder that is deleted when it finishes."
 
+    # Show effective installer sources so the user can confirm what will be used.
+    Write-Host ""
+    $jdkLabel  = if ($Config.JdkMsiSource -match '(?i)^https?://')        { 'URL   ' } else { 'LOCAL ' }
+    $ctLabel   = if ($Config.CmdlineToolsSource -match '(?i)^https?://') { 'URL   ' } else { 'LOCAL ' }
+    Write-Info "JDK MSI source         [$jdkLabel]: $($Config.JdkMsiSource)"
+    Write-Info "Cmdline-tools source   [$ctLabel]: $($Config.CmdlineToolsSource)"
+    if ($JdkMsiSource)       { Write-Warnish "(JDK source overridden via -JdkMsiSource parameter)" }
+    if ($CmdlineToolsSource) { Write-Warnish "(Cmdline-tools source overridden via -CmdlineToolsSource parameter)" }
+
+    # Validate any local paths NOW -- fail fast before we touch the machine.
+    foreach ($check in @(
+        @{ Param = '-JdkMsiSource';       Source = $Config.JdkMsiSource       },
+        @{ Param = '-CmdlineToolsSource'; Source = $Config.CmdlineToolsSource }
+    )) {
+        $src = $check.Source
+        if ($src -notmatch '(?i)^https?://') {
+            $abs = [IO.Path]::GetFullPath($src)
+            if (-not (Test-Path $abs -PathType Leaf)) {
+                Write-Err "$($check.Param) points to a local path that does not exist:"
+                Write-Err "  $abs"
+                exit 1
+            }
+            Write-Ok "$($check.Param) local file verified: $abs"
+        }
+    }
+
+    # --- Guard: mutually exclusive platform switches ----------------------
+    if ($SkipAndroidPlatform -and $AndroidApiLevel -gt 0) {
+        Write-Err "-SkipAndroidPlatform and -AndroidApiLevel cannot be used together."
+        exit 1
+    }
+
     # --- Guard: must be elevated ------------------------------------------
     if (-not (Test-IsAdmin)) {
         Write-Err "This script must be run from an ELEVATED (Administrator) PowerShell prompt."
@@ -655,12 +1012,30 @@ try {
     $javaHome = Resolve-JdkHome
     Write-Info "Resolved JAVA_HOME -> $javaHome"
 
+    # cmdline-tools must be installed before we can query sdkmanager.
     Install-AndroidCmdlineTools
+
+    # --- Query the live platform list and let the user choose ------------
+    # sdkmanager is now available so we can get real, up-to-date options.
+    if ($SkipAndroidPlatform) {
+        Resolve-AndroidPlatform -Catalogue $null
+    } else {
+        $catalogue = Get-AndroidPlatformCatalogue -JavaHome $javaHome
+        Resolve-AndroidPlatform -Catalogue $catalogue
+    }
+
     Install-AndroidSdkComponents -JavaHome $javaHome
     Set-EnvironmentVariables    -JavaHome $javaHome
 
-    Test-Toolchain      -JavaHome $javaHome
-    Build-SampleProject
+    Test-Toolchain -JavaHome $javaHome
+
+    # Only build the sample project when a platform was actually installed.
+    if ($Config.AndroidApiLevel) {
+        Build-SampleProject
+    } else {
+        Write-Step "[8/8] Validation build SKIPPED (no Android platform installed)"
+        Write-Warnish "Install an Android platform (e.g. -AndroidApiLevel 35) and re-run to validate."
+    }
 
     Write-Banner "SETUP COMPLETE"
     Write-Ok "Your machine is ready to build .NET MAUI Android apps without an IDE."
@@ -670,7 +1045,13 @@ try {
     Write-Host ""
     Write-Host "    dotnet new maui -n MyApp"      -ForegroundColor White
     Write-Host "    cd MyApp"                       -ForegroundColor White
-    Write-Host "    dotnet build -f $($Config.MauiTfm)" -ForegroundColor White
+    if ($Config.AndroidApiLevel) {
+        Write-Host "    dotnet build -f $($Config.MauiTfm)" -ForegroundColor White
+    } else {
+        Write-Host "    # Install an Android platform first, e.g.:" -ForegroundColor DarkGray
+        Write-Host "    #   sdkmanager 'platforms;android-35' 'build-tools;35.0.0'" -ForegroundColor DarkGray
+        Write-Host "    dotnet build -f net10.0-android" -ForegroundColor White
+    }
     Write-Host ""
 }
 catch {
